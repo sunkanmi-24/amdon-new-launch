@@ -1,191 +1,641 @@
 import { useState, useEffect } from "react";
-import { Link } from "react-router-dom";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { getMembers } from "@/lib/memberStore";
-import { MemberRecord } from "@/types/registration";
-import { ArrowLeft, Lock, User, CalendarDays, MapPin, Phone, Mail, Building2, Edit, Save } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
+import {
+  getMyProfile,
+  updateContact,
+  updateAddress,
+  MemberProfile,
+} from "@/lib/api";
+import { clearSession, isLoggedIn, getStoredUser } from "@/lib/auth";
 import { toast } from "sonner";
+import {
+  User, Lock, Phone, Mail, MapPin, Building2,
+  Edit3, Save, X, LogOut, Copy, CheckCircle,
+  CalendarDays, Shield, Briefcase, Users,
+  ChevronRight, AlertCircle, Loader2,
+} from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
+
+// ─── Types ──────────────────────────────────────────────────────────
+type EditSection = "contact" | "address" | null;
+
+// ─── Helpers ────────────────────────────────────────────────────────
+function getInitials(first: string, last: string) {
+  return `${first[0] ?? ""}${last[0] ?? ""}`.toUpperCase();
+}
+
+function formatDate(iso: string) {
+  return new Date(iso).toLocaleDateString("en-NG", {
+    year: "numeric", month: "long", day: "numeric",
+  });
+}
+
+function daysSince(iso: string) {
+  return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+}
+
+// ─── Sub-components ────────────────────────────────────────────────
+
+const InfoRow = ({
+  label,
+  value,
+  locked,
+}: {
+  label: string;
+  value: string | null | undefined;
+  locked?: boolean;
+}) => (
+  <div
+    className={cn(
+      "flex items-start justify-between gap-4 px-4 py-3 rounded-xl transition-colors",
+      locked ? "bg-muted/60 cursor-not-allowed" : "bg-muted/30 hover:bg-muted/50"
+    )}
+  >
+    <div className="min-w-0">
+      <p className="text-[11px] uppercase tracking-wider text-muted-foreground font-medium mb-0.5">
+        {label}
+      </p>
+      <p className="text-sm font-semibold truncate">{value || "—"}</p>
+    </div>
+    {locked && <Lock className="w-3.5 h-3.5 text-muted-foreground shrink-0 mt-1" />}
+  </div>
+);
+
+const SectionCard = ({
+  title,
+  icon,
+  children,
+  action,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+  action?: React.ReactNode;
+}) => (
+  <div className="bg-card border rounded-2xl overflow-hidden shadow-sm">
+    <div className="flex items-center justify-between px-5 py-4 border-b bg-muted/20">
+      <div className="flex items-center gap-2.5">
+        <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary">
+          {icon}
+        </div>
+        <h3 className="font-heading font-semibold text-sm">{title}</h3>
+      </div>
+      {action}
+    </div>
+    <div className="p-4 space-y-2">{children}</div>
+  </div>
+);
+
+const StatCard = ({
+  value,
+  label,
+  icon,
+  accent,
+}: {
+  value: string;
+  label: string;
+  icon: React.ReactNode;
+  accent?: string;
+}) => (
+  <div className={cn("rounded-2xl p-4 flex items-center gap-3 border", accent || "bg-card")}>
+    <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary shrink-0">
+      {icon}
+    </div>
+    <div>
+      <p className="font-heading font-bold text-lg leading-tight">{value}</p>
+      <p className="text-[11px] text-muted-foreground uppercase tracking-wide">{label}</p>
+    </div>
+  </div>
+);
+
+// ─── Main Component ────────────────────────────────────────────────
 
 const DashboardPage = () => {
-  const [members, setMembers] = useState<MemberRecord[]>([]);
-  const [selected, setSelected] = useState<MemberRecord | null>(null);
-  const [isEditing, setIsEditing] = useState(false);
-  const [editData, setEditData] = useState<{ phone1: string; phone2: string; email: string; fullAddress: string; dealershipDescription: string }>({
-    phone1: "", phone2: "", email: "", fullAddress: "", dealershipDescription: "",
+  const navigate = useNavigate();
+  const [profile, setProfile] = useState<MemberProfile | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [fetchError, setFetchError] = useState("");
+  const [editSection, setEditSection] = useState<EditSection>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [idCopied, setIdCopied] = useState(false);
+
+  // Edit state — contact
+  const [editContact, setEditContact] = useState({
+    phonePrimary: "", phoneSecondary: "", email: "", nokName: "", nokPhone: "",
   });
 
+  // Edit state — address
+  const [editAddress, setEditAddress] = useState({
+    fullAddress: "", businessDescription: "",
+  });
+
+  // ─── Auth guard ────────────────────────────────────────────────
   useEffect(() => {
-    const all = getMembers();
-    setMembers(all);
-    if (all.length > 0) {
-      setSelected(all[all.length - 1]); // show most recent
+    if (!isLoggedIn()) {
+      navigate("/login", { replace: true });
     }
+  }, [navigate]);
+
+  // ─── Fetch profile ─────────────────────────────────────────────
+  useEffect(() => {
+    const load = async () => {
+      setIsLoading(true);
+      try {
+        const data = await getMyProfile();
+        setProfile(data);
+        // Pre-fill edit states
+        setEditContact({
+          phonePrimary: data.contact.phone_primary,
+          phoneSecondary: data.contact.phone_secondary || "",
+          email: data.contact.email,
+          nokName: data.contact.nok_name,
+          nokPhone: data.contact.nok_phone,
+        });
+        setEditAddress({
+          fullAddress: data.location.full_address,
+          businessDescription: data.location.business_description || "",
+        });
+      } catch (err) {
+        setFetchError((err as Error).message);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    load();
   }, []);
 
-  useEffect(() => {
-    if (selected) {
-      setEditData({
-        phone1: selected.contact.phone1,
-        phone2: selected.contact.phone2,
-        email: selected.contact.email,
-        fullAddress: selected.location.fullAddress,
-        dealershipDescription: selected.location.dealershipDescription,
-      });
-    }
-  }, [selected]);
-
-  const handleSave = () => {
-    if (!selected) return;
-    // In production, this would update Supabase
-    toast.success("Profile updated successfully");
-    setIsEditing(false);
+  const handleLogout = () => {
+    clearSession();
+    toast.success("Logged out");
+    navigate("/");
   };
 
-  if (members.length === 0) {
+  const copyMemberId = () => {
+    if (!profile) return;
+    navigator.clipboard.writeText(profile.memberId);
+    setIdCopied(true);
+    toast.success("Member ID copied");
+    setTimeout(() => setIdCopied(false), 2000);
+  };
+
+  const handleSaveContact = async () => {
+    setIsSaving(true);
+    try {
+      await updateContact({
+        phonePrimary: editContact.phonePrimary,
+        phoneSecondary: editContact.phoneSecondary || undefined,
+        email: editContact.email,
+        nokName: editContact.nokName,
+        nokPhone: editContact.nokPhone,
+      });
+      // Update local profile
+      setProfile((prev) =>
+        prev
+          ? {
+              ...prev,
+              contact: {
+                ...prev.contact,
+                phone_primary: editContact.phonePrimary,
+                phone_secondary: editContact.phoneSecondary || null,
+                email: editContact.email,
+                nok_name: editContact.nokName,
+                nok_phone: editContact.nokPhone,
+              },
+            }
+          : prev
+      );
+      toast.success("Contact info updated");
+      setEditSection(null);
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSaveAddress = async () => {
+    setIsSaving(true);
+    try {
+      await updateAddress({
+        fullAddress: editAddress.fullAddress,
+        businessDescription: editAddress.businessDescription || undefined,
+      });
+      setProfile((prev) =>
+        prev
+          ? {
+              ...prev,
+              location: {
+                ...prev.location,
+                full_address: editAddress.fullAddress,
+                business_description: editAddress.businessDescription || null,
+              },
+            }
+          : prev
+      );
+      toast.success("Address updated");
+      setEditSection(null);
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // ─── Loading ───────────────────────────────────────────────────
+  if (isLoading) {
     return (
-      <div className="min-h-screen bg-background">
-        <header className="border-b bg-card">
-          <div className="container mx-auto px-4 py-4 flex items-center gap-3">
-            <Link to="/"><Button variant="ghost" size="icon"><ArrowLeft className="w-4 h-4" /></Button></Link>
-            <h1 className="font-heading font-bold text-lg">Member Dashboard</h1>
-          </div>
-        </header>
-        <div className="container mx-auto px-4 py-16 text-center max-w-md">
-          <User className="w-16 h-16 mx-auto text-muted-foreground mb-4" />
-          <h2 className="font-heading text-xl font-bold mb-2">No Members Yet</h2>
-          <p className="text-muted-foreground mb-6">Register first to access your dashboard.</p>
-          <Link to="/register"><Button>Register Now</Button></Link>
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <Loader2 className="w-10 h-10 animate-spin text-primary mx-auto" />
+          <p className="text-sm text-muted-foreground">Loading your dashboard…</p>
         </div>
       </div>
     );
   }
 
-  const m = selected!;
-  const fullName = [m.bio.firstName, m.bio.middleName, m.bio.lastName].filter(Boolean).join(" ");
+  // ─── Error ─────────────────────────────────────────────────────
+  if (fetchError) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center p-4">
+        <div className="max-w-sm text-center space-y-4">
+          <AlertCircle className="w-12 h-12 text-destructive mx-auto" />
+          <h2 className="font-heading font-bold text-xl">Could not load profile</h2>
+          <p className="text-sm text-muted-foreground">{fetchError}</p>
+          <div className="flex gap-2 justify-center">
+            <Button variant="outline" onClick={() => navigate("/login")}>
+              Sign in again
+            </Button>
+            <Button onClick={() => window.location.reload()}>Retry</Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!profile) return null;
+
+  const p = profile;
+  const fullName = [p.bio.first_name, p.bio.middle_name, p.bio.last_name]
+    .filter(Boolean)
+    .join(" ");
+  const days = daysSince(p.registrationDate);
 
   return (
     <div className="min-h-screen bg-background">
-      <header className="border-b bg-card">
-        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
+      {/* ── Header ─────────────────────────────────────────────── */}
+      <header className="border-b bg-card/80 backdrop-blur-sm sticky top-0 z-10">
+        <div className="container mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <Link to="/"><Button variant="ghost" size="icon"><ArrowLeft className="w-4 h-4" /></Button></Link>
-            <h1 className="font-heading font-bold text-lg">Member Dashboard</h1>
+            <Link to="/">
+              <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
+                <span className="text-primary-foreground font-bold text-sm">A</span>
+              </div>
+            </Link>
+            <span className="font-heading font-bold text-sm hidden sm:block">
+              AMDON Dashboard
+            </span>
           </div>
-          {members.length > 1 && (
-            <select
-              className="text-sm border rounded-md px-2 py-1 bg-background"
-              value={m.memberId}
-              onChange={(e) => setSelected(members.find((x) => x.memberId === e.target.value) || null)}
-            >
-              {members.map((mem) => (
-                <option key={mem.memberId} value={mem.memberId}>{mem.memberId}</option>
-              ))}
-            </select>
-          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleLogout}
+            className="text-muted-foreground hover:text-destructive"
+          >
+            <LogOut className="w-4 h-4 mr-1.5" />
+            <span className="hidden sm:inline">Logout</span>
+          </Button>
         </div>
       </header>
 
-      <div className="container mx-auto px-4 py-8 max-w-3xl space-y-6">
-        {/* Profile Header */}
-        <Card>
-          <div className="bg-primary p-6 flex items-center gap-4">
-            <div className="w-16 h-16 rounded-full bg-primary-foreground/20 flex items-center justify-center shrink-0">
-              <User className="w-8 h-8 text-primary-foreground" />
-            </div>
-            <div>
-              <h2 className="text-primary-foreground font-heading font-bold text-xl">{fullName}</h2>
-              <Badge variant="secondary" className="font-mono mt-1">{m.memberId}</Badge>
+      <div className="container mx-auto px-4 py-6 max-w-2xl space-y-5">
+        {/* ── Hero / Profile Card ─────────────────────────────── */}
+        <div className="rounded-2xl overflow-hidden shadow-lg border">
+          {/* Gradient banner */}
+          <div className="bg-gradient-to-br from-primary via-primary/90 to-blue-700 p-6">
+            <div className="flex items-start gap-4">
+              {/* Avatar */}
+              <div className="relative shrink-0">
+                {p.bio.photo_url ? (
+                  <img
+                    src={p.bio.photo_url}
+                    alt={fullName}
+                    className="w-20 h-20 rounded-2xl object-cover border-2 border-white/30"
+                  />
+                ) : (
+                  <div className="w-20 h-20 rounded-2xl bg-white/20 flex items-center justify-center border-2 border-white/30">
+                    <span className="text-white font-heading font-bold text-2xl">
+                      {getInitials(p.bio.first_name, p.bio.last_name)}
+                    </span>
+                  </div>
+                )}
+                <div className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-green-400 border-2 border-white" />
+              </div>
+
+              {/* Name & ID */}
+              <div className="flex-1 min-w-0">
+                <h2 className="text-white font-heading font-bold text-xl leading-tight truncate">
+                  {fullName}
+                </h2>
+                <p className="text-blue-100 text-sm mt-0.5">{p.bio.occupation}</p>
+
+                {/* Member ID badge */}
+                <button
+                  onClick={copyMemberId}
+                  className="mt-3 flex items-center gap-1.5 bg-white/15 hover:bg-white/25 transition-colors rounded-lg px-3 py-1.5 group"
+                >
+                  <span className="font-mono text-white text-xs font-semibold tracking-wide">
+                    {p.memberId}
+                  </span>
+                  {idCopied ? (
+                    <CheckCircle className="w-3 h-3 text-green-300" />
+                  ) : (
+                    <Copy className="w-3 h-3 text-blue-200 group-hover:text-white transition-colors" />
+                  )}
+                </button>
+              </div>
             </div>
           </div>
-          <CardContent className="p-4">
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <CalendarDays className="w-4 h-4" />
-              Registered on {new Date(m.registeredAt).toLocaleDateString("en-NG", { year: "numeric", month: "long", day: "numeric" })}
+
+          {/* Status bar */}
+          <div className="bg-card px-5 py-3 flex items-center justify-between border-t">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+              <span className="text-xs font-medium capitalize text-green-600">
+                {p.accountStatus}
+              </span>
             </div>
-          </CardContent>
-        </Card>
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <CalendarDays className="w-3.5 h-3.5" />
+              Member since {formatDate(p.registrationDate)}
+            </div>
+          </div>
+        </div>
 
-        {/* Locked Fields */}
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base flex items-center gap-2">
-              <Lock className="w-4 h-4 text-muted-foreground" /> Non-Editable Information
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {[
-              { label: "Full Name", value: fullName },
-              { label: "Date of Birth", value: m.bio.dateOfBirth },
-              { label: "Gender", value: m.bio.gender },
-              { label: "State", value: m.location.state },
-              { label: "LGA", value: m.location.lga },
-              { label: "Member ID", value: m.memberId },
-            ].map((f) => (
-              <Tooltip key={f.label}>
-                <TooltipTrigger asChild>
-                  <div className="flex items-center justify-between bg-muted/50 rounded-lg px-4 py-2.5 cursor-not-allowed">
-                    <div>
-                      <p className="text-xs text-muted-foreground">{f.label}</p>
-                      <p className="text-sm font-medium">{f.value}</p>
-                    </div>
-                    <Lock className="w-3.5 h-3.5 text-muted-foreground" />
-                  </div>
-                </TooltipTrigger>
-                <TooltipContent>Contact admin to update this information</TooltipContent>
-              </Tooltip>
-            ))}
-          </CardContent>
-        </Card>
+        {/* ── Stats Row ───────────────────────────────────────── */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          <StatCard
+            value={`${days}d`}
+            label="Days as Member"
+            icon={<CalendarDays className="w-5 h-5" />}
+          />
+          <StatCard
+            value={p.location.state}
+            label="State"
+            icon={<MapPin className="w-5 h-5" />}
+          />
+          <StatCard
+            value={p.location.dealership_category || "Member"}
+            label="Category"
+            icon={<Briefcase className="w-5 h-5" />}
+          />
+        </div>
 
-        {/* Editable Fields */}
-        <Card>
-          <CardHeader className="pb-3">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-base">Editable Information</CardTitle>
-              {!isEditing ? (
-                <Button variant="outline" size="sm" onClick={() => setIsEditing(true)}>
-                  <Edit className="w-3.5 h-3.5 mr-1.5" /> Edit Profile
+        {/* ── Locked — Personal Info ──────────────────────────── */}
+        <SectionCard
+          title="Personal Information"
+          icon={<User className="w-4 h-4" />}
+          action={
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div className="flex items-center gap-1 text-xs text-muted-foreground bg-muted px-2.5 py-1 rounded-lg cursor-help">
+                  <Lock className="w-3 h-3" /> Locked
+                </div>
+              </TooltipTrigger>
+              <TooltipContent>Contact admin to update these fields</TooltipContent>
+            </Tooltip>
+          }
+        >
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <InfoRow label="First Name" value={p.bio.first_name} locked />
+            <InfoRow label="Last Name" value={p.bio.last_name} locked />
+            <InfoRow label="Date of Birth" value={p.bio.date_of_birth} locked />
+            <InfoRow label="Gender" value={p.bio.gender} locked />
+            <InfoRow label="Nationality" value={p.bio.nationality} locked />
+            <InfoRow label="Occupation" value={p.bio.occupation} locked />
+          </div>
+        </SectionCard>
+
+        {/* ── Locked — Location ───────────────────────────────── */}
+        <SectionCard
+          title="State & LGA"
+          icon={<MapPin className="w-4 h-4" />}
+          action={
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div className="flex items-center gap-1 text-xs text-muted-foreground bg-muted px-2.5 py-1 rounded-lg cursor-help">
+                  <Lock className="w-3 h-3" /> Locked
+                </div>
+              </TooltipTrigger>
+              <TooltipContent>Contact admin to update state or LGA</TooltipContent>
+            </Tooltip>
+          }
+        >
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <InfoRow label="State" value={p.location.state} locked />
+            <InfoRow label="LGA" value={p.location.lga} locked />
+          </div>
+        </SectionCard>
+
+        {/* ── Editable — Address & Business ──────────────────── */}
+        <SectionCard
+          title="Address & Business"
+          icon={<Building2 className="w-4 h-4" />}
+          action={
+            editSection !== "address" ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 text-xs"
+                onClick={() => setEditSection("address")}
+              >
+                <Edit3 className="w-3 h-3 mr-1" /> Edit
+              </Button>
+            ) : (
+              <div className="flex gap-1.5">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => setEditSection(null)}
+                  disabled={isSaving}
+                >
+                  <X className="w-3 h-3 mr-1" /> Cancel
                 </Button>
-              ) : (
-                <div className="flex gap-2">
-                  <Button variant="ghost" size="sm" onClick={() => setIsEditing(false)}>Cancel</Button>
-                  <Button size="sm" onClick={handleSave}>
-                    <Save className="w-3.5 h-3.5 mr-1.5" /> Save
-                  </Button>
+                <Button
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={handleSaveAddress}
+                  disabled={isSaving}
+                >
+                  {isSaving ? (
+                    <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                  ) : (
+                    <Save className="w-3 h-3 mr-1" />
+                  )}
+                  Save
+                </Button>
+              </div>
+            )
+          }
+        >
+          {editSection === "address" ? (
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <Label className="text-xs">Full Address</Label>
+                <Textarea
+                  rows={3}
+                  value={editAddress.fullAddress}
+                  onChange={(e) =>
+                    setEditAddress({ ...editAddress, fullAddress: e.target.value })
+                  }
+                  className="resize-none"
+                />
+              </div>
+              {(p.location.dealership_name || p.location.business_description) && (
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Business Description</Label>
+                  <Textarea
+                    rows={2}
+                    value={editAddress.businessDescription}
+                    onChange={(e) =>
+                      setEditAddress({
+                        ...editAddress,
+                        businessDescription: e.target.value,
+                      })
+                    }
+                    className="resize-none"
+                  />
                 </div>
               )}
             </div>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <Label className="text-xs">Primary Phone</Label>
-                <Input disabled={!isEditing} value={editData.phone1} onChange={(e) => setEditData({ ...editData, phone1: e.target.value })} />
+          ) : (
+            <div className="space-y-2">
+              <InfoRow label="Full Address" value={p.location.full_address} />
+              {p.location.dealership_name && (
+                <InfoRow label="Dealership Name" value={p.location.dealership_name} />
+              )}
+              {p.location.dealership_category && (
+                <InfoRow label="Category" value={p.location.dealership_category} />
+              )}
+              {p.location.years_in_operation && (
+                <InfoRow
+                  label="Years in Operation"
+                  value={`${p.location.years_in_operation} years`}
+                />
+              )}
+              {p.location.business_description && (
+                <InfoRow
+                  label="Business Description"
+                  value={p.location.business_description}
+                />
+              )}
+            </div>
+          )}
+        </SectionCard>
+
+        {/* ── Editable — Contact Info ─────────────────────────── */}
+        <SectionCard
+          title="Contact Information"
+          icon={<Phone className="w-4 h-4" />}
+          action={
+            editSection !== "contact" ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 text-xs"
+                onClick={() => setEditSection("contact")}
+              >
+                <Edit3 className="w-3 h-3 mr-1" /> Edit
+              </Button>
+            ) : (
+              <div className="flex gap-1.5">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => setEditSection(null)}
+                  disabled={isSaving}
+                >
+                  <X className="w-3 h-3 mr-1" /> Cancel
+                </Button>
+                <Button
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={handleSaveContact}
+                  disabled={isSaving}
+                >
+                  {isSaving ? (
+                    <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                  ) : (
+                    <Save className="w-3 h-3 mr-1" />
+                  )}
+                  Save
+                </Button>
               </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">Secondary / WhatsApp</Label>
-                <Input disabled={!isEditing} value={editData.phone2} onChange={(e) => setEditData({ ...editData, phone2: e.target.value })} />
-              </div>
+            )
+          }
+        >
+          {editSection === "contact" ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {[
+                { label: "Primary Phone", key: "phonePrimary" as const },
+                { label: "Secondary / WhatsApp", key: "phoneSecondary" as const },
+                { label: "Email Address", key: "email" as const },
+                { label: "Next of Kin Name", key: "nokName" as const },
+                { label: "Next of Kin Phone", key: "nokPhone" as const },
+              ].map(({ label, key }) => (
+                <div key={key} className="space-y-1.5">
+                  <Label className="text-xs">{label}</Label>
+                  <Input
+                    value={editContact[key]}
+                    onChange={(e) =>
+                      setEditContact({ ...editContact, [key]: e.target.value })
+                    }
+                    className="h-9"
+                  />
+                </div>
+              ))}
             </div>
-            <div className="space-y-1.5">
-              <Label className="text-xs">Email Address</Label>
-              <Input disabled={!isEditing} value={editData.email} onChange={(e) => setEditData({ ...editData, email: e.target.value })} />
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <InfoRow label="Primary Phone" value={p.contact.phone_primary} />
+              <InfoRow label="Secondary Phone" value={p.contact.phone_secondary} />
+              <InfoRow label="Email" value={p.contact.email} />
+              <InfoRow label="Next of Kin" value={p.contact.nok_name} />
+              <InfoRow label="NOK Phone" value={p.contact.nok_phone} />
             </div>
-            <div className="space-y-1.5">
-              <Label className="text-xs">Full Address</Label>
-              <Input disabled={!isEditing} value={editData.fullAddress} onChange={(e) => setEditData({ ...editData, fullAddress: e.target.value })} />
-            </div>
-            <div className="space-y-1.5">
-              <Label className="text-xs">Dealership Description</Label>
-              <Input disabled={!isEditing} value={editData.dealershipDescription} onChange={(e) => setEditData({ ...editData, dealershipDescription: e.target.value })} />
-            </div>
-          </CardContent>
-        </Card>
+          )}
+        </SectionCard>
+
+        {/* ── Next of Kin ─────────────────────────────────────── */}
+        <SectionCard
+          title="Emergency Contact"
+          icon={<Users className="w-4 h-4" />}
+        >
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <InfoRow label="Name" value={p.contact.nok_name} />
+            <InfoRow label="Phone" value={p.contact.nok_phone} />
+          </div>
+        </SectionCard>
+
+        {/* ── Footer ─────────────────────────────────────────── */}
+        <div className="text-center py-4 space-y-1">
+          <p className="text-xs text-muted-foreground">
+            To update locked fields, contact your AMDON administrator.
+          </p>
+          <button
+            onClick={handleLogout}
+            className="text-xs text-destructive hover:underline"
+          >
+            Sign out of this account
+          </button>
+        </div>
       </div>
     </div>
   );

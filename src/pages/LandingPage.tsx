@@ -24,9 +24,9 @@ const LandingPage = () => {
                 <Search className="w-4 h-4 mr-1.5" /> Look Up ID
               </Button>
             </Link>
-            <Link to="/dashboard">
-              <Button variant="outline" size="sm">Dashboard</Button>
-            </Link>
+           <Link to="/login">
+  <Button variant="outline" size="sm">Member Login</Button>
+</Link>
           </div>
         </div>
       </header>

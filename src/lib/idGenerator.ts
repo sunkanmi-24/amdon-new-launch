@@ -1,10 +1,9 @@
-// Client-side ID generation (demo). In production, use Supabase Edge Function with row-level locking.
-const counters: Record<string, number> = {};
+// ID generation is now handled server-side.
+// The backend returns the memberId after POST /api/registration/submit.
+// This file is kept as a no-op to avoid breaking any existing imports.
 
-export function generateMemberId(stateCode: string): string {
-  const year = new Date().getFullYear();
-  const key = `${stateCode}-${year}`;
-  counters[key] = (counters[key] || 0) + 1;
-  const sequence = String(counters[key]).padStart(4, "0");
-  return `AMDON-${stateCode}-${year}-${sequence}`;
+/** @deprecated — use submitRegistration() from api.ts instead */
+export function generateMemberId(_stateCode: string): string {
+  console.warn("generateMemberId() is deprecated. ID is now generated server-side.");
+  return "PENDING";
 }
