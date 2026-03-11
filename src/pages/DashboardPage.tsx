@@ -1,18 +1,21 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   getMyProfile,
   updateContact,
   updateAddress,
+  uploadPhoto,
+  updatePhoto,
   MemberProfile,
 } from "@/lib/api";
-import { clearSession, isLoggedIn, getStoredUser } from "@/lib/auth";
+import { clearSession, isLoggedIn } from "@/lib/auth";
 import { toast } from "sonner";
 import {
-  User, Lock, Phone, Mail, MapPin, Building2,
+  User, Lock, Phone, MapPin, Building2,
   Edit3, Save, X, LogOut, Copy, CheckCircle,
-  CalendarDays, Shield, Briefcase, Users,
-  ChevronRight, AlertCircle, Loader2,
+  CalendarDays, Briefcase, Users,
+  AlertCircle, Loader2, Camera, ImagePlus,
+  Trash2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,39 +25,177 @@ import { Label } from "@/components/ui/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
-// ─── Types ──────────────────────────────────────────────────────────
+// ─── Types ───────────────────────────────────────────────────────────
 type EditSection = "contact" | "address" | null;
 
-// ─── Helpers ────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────
 function getInitials(first: string, last: string) {
-  return `${first[0] ?? ""}${last[0] ?? ""}`.toUpperCase();
+  return `${first?.[0] ?? ""}${last?.[0] ?? ""}`.toUpperCase();
 }
-
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString("en-NG", {
     year: "numeric", month: "long", day: "numeric",
   });
 }
-
 function daysSince(iso: string) {
   return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
 }
 
-// ─── Sub-components ────────────────────────────────────────────────
+// ─── Photo Upload Hook ────────────────────────────────────────────────
+function usePhotoUpload(
+  currentUrl: string | null,
+  onSuccess: (url: string) => void
+) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [preview, setPreview] = useState<string | null>(currentUrl);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
+  // Sync preview if parent profile reloads
+  useEffect(() => { setPreview(currentUrl); }, [currentUrl]);
+
+  const triggerPicker = () => inputRef.current?.click();
+
+  const handleFileChange = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+
+      // Client-side validation
+      const allowed = ["image/jpeg", "image/png", "image/webp"];
+      if (!allowed.includes(file.type)) {
+        toast.error("Only JPEG, PNG, or WebP images are allowed");
+        return;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        toast.error("Image must be under 5 MB");
+        return;
+      }
+
+      // Show local preview immediately
+      const objectUrl = URL.createObjectURL(file);
+      setPreview(objectUrl);
+      setIsUploading(true);
+      setUploadProgress(0);
+
+      // Fake smooth progress while uploading
+      const ticker = setInterval(() => {
+        setUploadProgress((p) => Math.min(p + 8, 85));
+      }, 120);
+
+      try {
+        // 1. Upload to Supabase Storage
+        const photoUrl = await uploadPhoto(file);
+        // 2. Save URL to member_bio table
+        await updatePhoto(photoUrl);
+
+        clearInterval(ticker);
+        setUploadProgress(100);
+        setPreview(photoUrl);
+        onSuccess(photoUrl);
+        toast.success("Profile photo updated!");
+      } catch (err) {
+        clearInterval(ticker);
+        setPreview(currentUrl); // revert preview
+        toast.error((err as Error).message || "Photo upload failed");
+      } finally {
+        setIsUploading(false);
+        setUploadProgress(0);
+        // Reset input so same file can be re-selected
+        if (inputRef.current) inputRef.current.value = "";
+      }
+    },
+    [currentUrl, onSuccess]
+  );
+
+  return { inputRef, preview, isUploading, uploadProgress, triggerPicker, handleFileChange };
+}
+
+// ─── Avatar with Upload Overlay ──────────────────────────────────────
+interface AvatarUploadProps {
+  firstName: string;
+  lastName: string;
+  photoUrl: string | null;
+  onPhotoUpdated: (url: string) => void;
+}
+
+const AvatarUpload = ({ firstName, lastName, photoUrl, onPhotoUpdated }: AvatarUploadProps) => {
+  const { inputRef, preview, isUploading, uploadProgress, triggerPicker, handleFileChange } =
+    usePhotoUpload(photoUrl, onPhotoUpdated);
+
+  return (
+    <div className="relative shrink-0 group">
+      {/* Hidden file input */}
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        className="hidden"
+        onChange={handleFileChange}
+      />
+
+      {/* Avatar image / initials */}
+      <div className="w-20 h-20 rounded-2xl overflow-hidden border-2 border-white/30 relative">
+        {preview ? (
+          <img
+            src={preview}
+            alt="Profile"
+            className={cn(
+              "w-full h-full object-cover transition-opacity duration-300",
+              isUploading && "opacity-40"
+            )}
+          />
+        ) : (
+          <div className="w-full h-full bg-white/20 flex items-center justify-center">
+            <span className="text-white font-heading font-bold text-2xl">
+              {getInitials(firstName, lastName)}
+            </span>
+          </div>
+        )}
+
+        {/* Upload progress ring overlay */}
+        {isUploading && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/30">
+            <Loader2 className="w-6 h-6 text-white animate-spin" />
+            <span className="text-white text-[10px] mt-1 font-semibold">
+              {uploadProgress}%
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Camera button — visible on hover or always on mobile */}
+      <button
+        onClick={triggerPicker}
+        disabled={isUploading}
+        title="Change profile photo"
+        className={cn(
+          "absolute -bottom-1.5 -right-1.5 w-7 h-7 rounded-full",
+          "bg-white text-primary shadow-lg border border-primary/20",
+          "flex items-center justify-center transition-all duration-200",
+          "opacity-100 sm:opacity-0 sm:group-hover:opacity-100",
+          "hover:scale-110 active:scale-95",
+          isUploading && "pointer-events-none opacity-50"
+        )}
+      >
+        <Camera className="w-3.5 h-3.5" />
+      </button>
+    </div>
+  );
+};
+
+// ─── Info Row ─────────────────────────────────────────────────────────
 const InfoRow = ({
-  label,
-  value,
-  locked,
+  label, value, locked,
 }: {
-  label: string;
-  value: string | null | undefined;
-  locked?: boolean;
+  label: string; value: string | null | undefined; locked?: boolean;
 }) => (
   <div
     className={cn(
       "flex items-start justify-between gap-4 px-4 py-3 rounded-xl transition-colors",
-      locked ? "bg-muted/60 cursor-not-allowed" : "bg-muted/30 hover:bg-muted/50"
+      locked
+        ? "bg-muted/60 cursor-not-allowed"
+        : "bg-muted/30 hover:bg-muted/50"
     )}
   >
     <div className="min-w-0">
@@ -67,11 +208,9 @@ const InfoRow = ({
   </div>
 );
 
+// ─── Section Card ─────────────────────────────────────────────────────
 const SectionCard = ({
-  title,
-  icon,
-  children,
-  action,
+  title, icon, children, action,
 }: {
   title: string;
   icon: React.ReactNode;
@@ -92,18 +231,13 @@ const SectionCard = ({
   </div>
 );
 
+// ─── Stat Card ────────────────────────────────────────────────────────
 const StatCard = ({
-  value,
-  label,
-  icon,
-  accent,
+  value, label, icon,
 }: {
-  value: string;
-  label: string;
-  icon: React.ReactNode;
-  accent?: string;
+  value: string; label: string; icon: React.ReactNode;
 }) => (
-  <div className={cn("rounded-2xl p-4 flex items-center gap-3 border", accent || "bg-card")}>
+  <div className="rounded-2xl p-4 flex items-center gap-3 border bg-card">
     <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary shrink-0">
       {icon}
     </div>
@@ -114,8 +248,7 @@ const StatCard = ({
   </div>
 );
 
-// ─── Main Component ────────────────────────────────────────────────
-
+// ─── Main DashboardPage ───────────────────────────────────────────────
 const DashboardPage = () => {
   const navigate = useNavigate();
   const [profile, setProfile] = useState<MemberProfile | null>(null);
@@ -125,31 +258,25 @@ const DashboardPage = () => {
   const [isSaving, setIsSaving] = useState(false);
   const [idCopied, setIdCopied] = useState(false);
 
-  // Edit state — contact
   const [editContact, setEditContact] = useState({
     phonePrimary: "", phoneSecondary: "", email: "", nokName: "", nokPhone: "",
   });
-
-  // Edit state — address
   const [editAddress, setEditAddress] = useState({
     fullAddress: "", businessDescription: "",
   });
 
-  // ─── Auth guard ────────────────────────────────────────────────
+  // ── Auth guard
   useEffect(() => {
-    if (!isLoggedIn()) {
-      navigate("/login", { replace: true });
-    }
+    if (!isLoggedIn()) navigate("/login", { replace: true });
   }, [navigate]);
 
-  // ─── Fetch profile ─────────────────────────────────────────────
+  // ── Fetch profile
   useEffect(() => {
     const load = async () => {
       setIsLoading(true);
       try {
         const data = await getMyProfile();
         setProfile(data);
-        // Pre-fill edit states
         setEditContact({
           phonePrimary: data.contact.phone_primary,
           phoneSecondary: data.contact.phone_secondary || "",
@@ -184,6 +311,13 @@ const DashboardPage = () => {
     setTimeout(() => setIdCopied(false), 2000);
   };
 
+  // Called when photo upload succeeds — update profile state
+  const handlePhotoUpdated = useCallback((url: string) => {
+    setProfile((prev) =>
+      prev ? { ...prev, bio: { ...prev.bio, photo_url: url } } : prev
+    );
+  }, []);
+
   const handleSaveContact = async () => {
     setIsSaving(true);
     try {
@@ -194,7 +328,6 @@ const DashboardPage = () => {
         nokName: editContact.nokName,
         nokPhone: editContact.nokPhone,
       });
-      // Update local profile
       setProfile((prev) =>
         prev
           ? {
@@ -247,7 +380,7 @@ const DashboardPage = () => {
     }
   };
 
-  // ─── Loading ───────────────────────────────────────────────────
+  // ── Loading
   if (isLoading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -259,7 +392,7 @@ const DashboardPage = () => {
     );
   }
 
-  // ─── Error ─────────────────────────────────────────────────────
+  // ── Error
   if (fetchError) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center p-4">
@@ -268,9 +401,7 @@ const DashboardPage = () => {
           <h2 className="font-heading font-bold text-xl">Could not load profile</h2>
           <p className="text-sm text-muted-foreground">{fetchError}</p>
           <div className="flex gap-2 justify-center">
-            <Button variant="outline" onClick={() => navigate("/login")}>
-              Sign in again
-            </Button>
+            <Button variant="outline" onClick={() => navigate("/login")}>Sign in again</Button>
             <Button onClick={() => window.location.reload()}>Retry</Button>
           </div>
         </div>
@@ -282,13 +413,12 @@ const DashboardPage = () => {
 
   const p = profile;
   const fullName = [p.bio.first_name, p.bio.middle_name, p.bio.last_name]
-    .filter(Boolean)
-    .join(" ");
+    .filter(Boolean).join(" ");
   const days = daysSince(p.registrationDate);
 
   return (
     <div className="min-h-screen bg-background">
-      {/* ── Header ─────────────────────────────────────────────── */}
+      {/* ── Header ──────────────────────────────────────────── */}
       <header className="border-b bg-card/80 backdrop-blur-sm sticky top-0 z-10">
         <div className="container mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -314,28 +444,18 @@ const DashboardPage = () => {
       </header>
 
       <div className="container mx-auto px-4 py-6 max-w-2xl space-y-5">
-        {/* ── Hero / Profile Card ─────────────────────────────── */}
+        {/* ── Hero / Profile Card ──────────────────────────── */}
         <div className="rounded-2xl overflow-hidden shadow-lg border">
           {/* Gradient banner */}
           <div className="bg-gradient-to-br from-primary via-primary/90 to-blue-700 p-6">
             <div className="flex items-start gap-4">
-              {/* Avatar */}
-              <div className="relative shrink-0">
-                {p.bio.photo_url ? (
-                  <img
-                    src={p.bio.photo_url}
-                    alt={fullName}
-                    className="w-20 h-20 rounded-2xl object-cover border-2 border-white/30"
-                  />
-                ) : (
-                  <div className="w-20 h-20 rounded-2xl bg-white/20 flex items-center justify-center border-2 border-white/30">
-                    <span className="text-white font-heading font-bold text-2xl">
-                      {getInitials(p.bio.first_name, p.bio.last_name)}
-                    </span>
-                  </div>
-                )}
-                <div className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-green-400 border-2 border-white" />
-              </div>
+              {/* Avatar with upload */}
+              <AvatarUpload
+                firstName={p.bio.first_name}
+                lastName={p.bio.last_name}
+                photoUrl={p.bio.photo_url}
+                onPhotoUpdated={handlePhotoUpdated}
+              />
 
               {/* Name & ID */}
               <div className="flex-1 min-w-0">
@@ -360,6 +480,16 @@ const DashboardPage = () => {
                 </button>
               </div>
             </div>
+
+            {/* Photo upload hint — shows only when no photo */}
+            {!p.bio.photo_url && (
+              <div className="mt-4 flex items-center gap-2 bg-white/10 rounded-xl px-4 py-2.5">
+                <ImagePlus className="w-4 h-4 text-blue-100 shrink-0" />
+                <p className="text-blue-100 text-xs">
+                  Tap the camera icon on your avatar to add a profile photo
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Status bar */}
@@ -377,7 +507,7 @@ const DashboardPage = () => {
           </div>
         </div>
 
-        {/* ── Stats Row ───────────────────────────────────────── */}
+        {/* ── Stats Row ────────────────────────────────────── */}
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
           <StatCard
             value={`${days}d`}
@@ -396,7 +526,7 @@ const DashboardPage = () => {
           />
         </div>
 
-        {/* ── Locked — Personal Info ──────────────────────────── */}
+        {/* ── Locked — Personal Info ───────────────────────── */}
         <SectionCard
           title="Personal Information"
           icon={<User className="w-4 h-4" />}
@@ -421,7 +551,7 @@ const DashboardPage = () => {
           </div>
         </SectionCard>
 
-        {/* ── Locked — Location ───────────────────────────────── */}
+        {/* ── Locked — State & LGA ─────────────────────────── */}
         <SectionCard
           title="State & LGA"
           icon={<MapPin className="w-4 h-4" />}
@@ -442,16 +572,14 @@ const DashboardPage = () => {
           </div>
         </SectionCard>
 
-        {/* ── Editable — Address & Business ──────────────────── */}
+        {/* ── Editable — Address & Business ────────────────── */}
         <SectionCard
           title="Address & Business"
           icon={<Building2 className="w-4 h-4" />}
           action={
             editSection !== "address" ? (
               <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 text-xs"
+                variant="ghost" size="sm" className="h-7 text-xs"
                 onClick={() => setEditSection("address")}
               >
                 <Edit3 className="w-3 h-3 mr-1" /> Edit
@@ -459,25 +587,18 @@ const DashboardPage = () => {
             ) : (
               <div className="flex gap-1.5">
                 <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={() => setEditSection(null)}
-                  disabled={isSaving}
+                  variant="ghost" size="sm" className="h-7 text-xs"
+                  onClick={() => setEditSection(null)} disabled={isSaving}
                 >
                   <X className="w-3 h-3 mr-1" /> Cancel
                 </Button>
                 <Button
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={handleSaveAddress}
-                  disabled={isSaving}
+                  size="sm" className="h-7 text-xs"
+                  onClick={handleSaveAddress} disabled={isSaving}
                 >
-                  {isSaving ? (
-                    <Loader2 className="w-3 h-3 animate-spin mr-1" />
-                  ) : (
-                    <Save className="w-3 h-3 mr-1" />
-                  )}
+                  {isSaving
+                    ? <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                    : <Save className="w-3 h-3 mr-1" />}
                   Save
                 </Button>
               </div>
@@ -491,9 +612,7 @@ const DashboardPage = () => {
                 <Textarea
                   rows={3}
                   value={editAddress.fullAddress}
-                  onChange={(e) =>
-                    setEditAddress({ ...editAddress, fullAddress: e.target.value })
-                  }
+                  onChange={(e) => setEditAddress({ ...editAddress, fullAddress: e.target.value })}
                   className="resize-none"
                 />
               </div>
@@ -504,10 +623,7 @@ const DashboardPage = () => {
                     rows={2}
                     value={editAddress.businessDescription}
                     onChange={(e) =>
-                      setEditAddress({
-                        ...editAddress,
-                        businessDescription: e.target.value,
-                      })
+                      setEditAddress({ ...editAddress, businessDescription: e.target.value })
                     }
                     className="resize-none"
                   />
@@ -523,7 +639,7 @@ const DashboardPage = () => {
               {p.location.dealership_category && (
                 <InfoRow label="Category" value={p.location.dealership_category} />
               )}
-              {p.location.years_in_operation && (
+              {p.location.years_in_operation != null && (
                 <InfoRow
                   label="Years in Operation"
                   value={`${p.location.years_in_operation} years`}
@@ -539,16 +655,14 @@ const DashboardPage = () => {
           )}
         </SectionCard>
 
-        {/* ── Editable — Contact Info ─────────────────────────── */}
+        {/* ── Editable — Contact Info ───────────────────────── */}
         <SectionCard
           title="Contact Information"
           icon={<Phone className="w-4 h-4" />}
           action={
             editSection !== "contact" ? (
               <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 text-xs"
+                variant="ghost" size="sm" className="h-7 text-xs"
                 onClick={() => setEditSection("contact")}
               >
                 <Edit3 className="w-3 h-3 mr-1" /> Edit
@@ -556,25 +670,18 @@ const DashboardPage = () => {
             ) : (
               <div className="flex gap-1.5">
                 <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={() => setEditSection(null)}
-                  disabled={isSaving}
+                  variant="ghost" size="sm" className="h-7 text-xs"
+                  onClick={() => setEditSection(null)} disabled={isSaving}
                 >
                   <X className="w-3 h-3 mr-1" /> Cancel
                 </Button>
                 <Button
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={handleSaveContact}
-                  disabled={isSaving}
+                  size="sm" className="h-7 text-xs"
+                  onClick={handleSaveContact} disabled={isSaving}
                 >
-                  {isSaving ? (
-                    <Loader2 className="w-3 h-3 animate-spin mr-1" />
-                  ) : (
-                    <Save className="w-3 h-3 mr-1" />
-                  )}
+                  {isSaving
+                    ? <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                    : <Save className="w-3 h-3 mr-1" />}
                   Save
                 </Button>
               </div>
@@ -583,13 +690,15 @@ const DashboardPage = () => {
         >
           {editSection === "contact" ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {[
-                { label: "Primary Phone", key: "phonePrimary" as const },
-                { label: "Secondary / WhatsApp", key: "phoneSecondary" as const },
-                { label: "Email Address", key: "email" as const },
-                { label: "Next of Kin Name", key: "nokName" as const },
-                { label: "Next of Kin Phone", key: "nokPhone" as const },
-              ].map(({ label, key }) => (
+              {(
+                [
+                  { label: "Primary Phone", key: "phonePrimary" },
+                  { label: "Secondary / WhatsApp", key: "phoneSecondary" },
+                  { label: "Email Address", key: "email" },
+                  { label: "Next of Kin Name", key: "nokName" },
+                  { label: "Next of Kin Phone", key: "nokPhone" },
+                ] as { label: string; key: keyof typeof editContact }[]
+              ).map(({ label, key }) => (
                 <div key={key} className="space-y-1.5">
                   <Label className="text-xs">{label}</Label>
                   <Input
@@ -613,7 +722,7 @@ const DashboardPage = () => {
           )}
         </SectionCard>
 
-        {/* ── Next of Kin ─────────────────────────────────────── */}
+        {/* ── Emergency Contact ────────────────────────────── */}
         <SectionCard
           title="Emergency Contact"
           icon={<Users className="w-4 h-4" />}
@@ -624,7 +733,7 @@ const DashboardPage = () => {
           </div>
         </SectionCard>
 
-        {/* ── Footer ─────────────────────────────────────────── */}
+        {/* ── Footer ──────────────────────────────────────── */}
         <div className="text-center py-4 space-y-1">
           <p className="text-xs text-muted-foreground">
             To update locked fields, contact your AMDON administrator.
