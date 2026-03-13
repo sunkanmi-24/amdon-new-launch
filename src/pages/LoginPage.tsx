@@ -17,25 +17,33 @@ const LoginPage = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const handleLogin = async () => {
-    setError("");
-    if (!email.trim() || !password.trim()) {
-      setError("Email and password are required.");
+  // Update handleLogin to handle EMAIL_NOT_VERIFIED response
+const handleLogin = async () => {
+  setError("");
+  if (!email.trim() || !password.trim()) {
+    setError("Email and password are required.");
+    return;
+  }
+
+  setIsLoading(true);
+  try {
+    const result = await login(email.trim(), password);
+    saveSession(result.accessToken, result.user);
+    toast.success("Welcome back!");
+    navigate("/dashboard");
+  } catch (err) {
+    const msg = (err as Error).message;
+    // If email not verified — redirect to verify page
+    if (msg.includes("Email not verified") || msg.includes("EMAIL_NOT_VERIFIED")) {
+      toast.error("Please verify your email first.");
+      navigate(`/verify-email?email=${encodeURIComponent(email.trim())}&name=Member`);
       return;
     }
-
-    setIsLoading(true);
-    try {
-      const result = await login(email.trim(), password);
-      saveSession(result.accessToken, result.user);
-      toast.success("Welcome back!");
-      navigate("/dashboard");
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+    setError(msg);
+  } finally {
+    setIsLoading(false);
+  }
+};
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") handleLogin();
@@ -135,6 +143,16 @@ const LoginPage = () => {
                   </span>
                 )}
               </Button>
+
+<div className="text-right">
+  <Link
+    to="/forgot-password"
+    className="text-xs text-muted-foreground hover:text-primary transition-colors"
+  >
+    Forgot password?
+  </Link>
+</div>
+
             </CardContent>
           </Card>
 

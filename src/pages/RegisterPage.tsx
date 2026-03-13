@@ -22,9 +22,10 @@ const STEP_LABELS = ["Personal Info", "Location & Business", "Contact Details"];
 interface SuccessScreenProps {
   memberId: string;
   email: string;
+  fullName: string;
 }
 
-const SuccessScreen = ({ memberId, email }: SuccessScreenProps) => {
+const SuccessScreen = ({ memberId, email, fullName }: SuccessScreenProps) => {
   const navigate = useNavigate();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -48,16 +49,14 @@ const SuccessScreen = ({ memberId, email }: SuccessScreenProps) => {
     setIsCreating(true);
     try {
       // 1. Create login account
-      await createLoginAccount(email, password, memberId);
-
-      // 2. Auto-login
-      const result = await login(email, password);
-      saveSession(result.accessToken, result.user);
-
-      toast.success("Account created! Taking you to your dashboard…");
-      setAccountCreated(true);
-
-      setTimeout(() => navigate("/dashboard"), 1500);
+    await createLoginAccount(email, password, memberId, fullName);
+     toast.success("Account created! Please verify your email.");
+setAccountCreated(true);
+setTimeout(() => {
+  navigate(
+    `/verify-email?email=${encodeURIComponent(email)}&name=${encodeURIComponent(fullName)}`
+  );
+}, 1500);
     } catch (err) {
       toast.error((err as Error).message);
     } finally {
@@ -188,7 +187,7 @@ const RegisterPage = () => {
   const [step, setStep] = useState(1);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [result, setResult] = useState<{ memberId: string; email: string } | null>(null);
+  const [result, setResult] = useState<{ memberId: string; email: string; fullName: string } | null>(null);
 
   const [bio, setBio] = useState<StepOneBio>({
     firstName: "", middleName: "", lastName: "",
@@ -280,7 +279,7 @@ const RegisterPage = () => {
       });
 
       toast.success("Registration successful!");
-      setResult({ memberId: registrationResult.memberId, email: contact.email });
+      setResult({ memberId: registrationResult.memberId, email: contact.email, fullName: `${bio.firstName} ${bio.lastName}` });
     } catch (err) {
       toast.error((err as Error).message);
     } finally {
@@ -290,7 +289,11 @@ const RegisterPage = () => {
 
   // Show success screen after successful registration
   if (result) {
-    return <SuccessScreen memberId={result.memberId} email={result.email} />;
+    return <SuccessScreen 
+    memberId={result.memberId}
+     email={result.email} 
+     fullName={result.fullName}
+     />;
   }
 
   return (

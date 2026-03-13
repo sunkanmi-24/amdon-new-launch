@@ -1,8 +1,7 @@
 import axios, { AxiosInstance, AxiosError } from "axios";
 
 // ─── Base URL ────────────────────────────────────────────────────
-const BASE_URL = "https://amdon-backend.vercel.app/api";
-
+const BASE_URL = "https://amdon-backened.vercel.app/api"; 
 // ─── Axios instance ──────────────────────────────────────────────
 const client: AxiosInstance = axios.create({
   baseURL: BASE_URL,
@@ -119,10 +118,12 @@ export async function fetchCategories(): Promise<{ id: string; name: string }[]>
 export async function createLoginAccount(
   email: string,
   password: string,
-  memberId: string
+  memberId: string,
+  fullName: string
+
 ): Promise<void> {
   try {
-    await client.post("/auth/register-user", { email, password, memberId });
+    await client.post("/auth/register-user", { email, password, memberId, fullName });
   } catch (err) {
     throw new Error(extractError(err));
   }
@@ -259,6 +260,50 @@ export async function queryMember(
     if (e.response?.status === 404) {
       return { found: false, message: e.response.data.message };
     }
+    throw new Error(extractError(err));
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// New auth endpoints
+// ═══════════════════════════════════════════════════════════════
+
+/** Verify email OTP after registration */
+export async function verifyEmail(email: string, code: string): Promise<void> {
+  try {
+    await client.post("/auth/verify-email", { email, code });
+  } catch (err) {
+    throw new Error(extractError(err));
+  }
+}
+
+/** Resend verification OTP */
+export async function resendVerification(email: string, fullName: string): Promise<void> {
+  try {
+    await client.post("/auth/resend-verification", { email, fullName });
+  } catch (err) {
+    throw new Error(extractError(err));
+  }
+}
+
+/** Request a password reset OTP */
+export async function forgotPassword(email: string): Promise<void> {
+  try {
+    await client.post("/auth/forgot-password", { email });
+  } catch (err) {
+    throw new Error(extractError(err));
+  }
+}
+
+/** Reset password using OTP code */
+export async function resetPassword(
+  email: string,
+  code: string,
+  newPassword: string
+): Promise<void> {
+  try {
+    await client.post("/auth/reset-password", { email, code, newPassword });
+  } catch (err) {
     throw new Error(extractError(err));
   }
 }
