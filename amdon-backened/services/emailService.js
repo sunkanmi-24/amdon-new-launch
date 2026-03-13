@@ -45,18 +45,22 @@ function codeBlock(code) {
 }
 
 // ─── 1. Registration confirmation email ─────────────────────────
+// ─── 1. Registration confirmation ───────────────────────────────
 async function sendConfirmationEmail({ to, fullName, memberId }) {
   const body = `
     <p style="color:#374151;">Dear <strong>${fullName}</strong>,</p>
     <p style="color:#374151;">Your AMDON registration was successful. Here is your unique Member ID:</p>
     <div style="background:#1a3c5e;border-radius:10px;padding:20px;text-align:center;margin:20px 0;">
-      <p style="color:#a0c4e8;font-size:12px;margin:0 0 6px;text-transform:uppercase;letter-spacing:1px;">Member ID</p>
-      <h1 style="color:white;font-size:28px;letter-spacing:3px;margin:0;font-family:monospace;">${memberId}</h1>
+      <p style="color:#a0c4e8;font-size:12px;margin:0 0 6px;
+                text-transform:uppercase;letter-spacing:1px;">Member ID</p>
+      <h1 style="color:white;font-size:28px;letter-spacing:3px;margin:0;
+                 font-family:monospace;">${memberId}</h1>
     </div>
-    <p style="color:#374151;">Keep this ID safe — you will need it to access your dashboard and verify membership.</p>
+    <p style="color:#374151;">
+      Keep this ID safe — you will need it to access your dashboard and verify membership.
+    </p>
   `;
-
-  await transporter.sendMail({
+  return sendMail({
     from: process.env.EMAIL_FROM,
     to,
     subject: `AMDON Registration Successful — Your Member ID: ${memberId}`,
@@ -69,13 +73,12 @@ async function sendVerificationEmail({ to, fullName, code }) {
   const body = `
     <p style="color:#374151;">Hi <strong>${fullName}</strong>,</p>
     <p style="color:#374151;">
-      Thank you for registering with AMDON. Please enter the verification code below 
-      to confirm your email address and activate your account.
+      Thank you for registering with AMDON. Please enter the verification 
+      code below to confirm your email address and activate your account.
     </p>
     ${codeBlock(code)}
   `;
-
-  await transporter.sendMail({
+  return sendMail({
     from: process.env.EMAIL_FROM,
     to,
     subject: 'AMDON — Verify Your Email Address',

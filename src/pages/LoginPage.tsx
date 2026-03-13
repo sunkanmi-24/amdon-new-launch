@@ -18,33 +18,42 @@ const LoginPage = () => {
   const [error, setError] = useState("");
 
   // Update handleLogin to handle EMAIL_NOT_VERIFIED response
-const handleLogin = async () => {
-  setError("");
-  if (!email.trim() || !password.trim()) {
-    setError("Email and password are required.");
-    return;
-  }
-
-  setIsLoading(true);
-  try {
-    const result = await login(email.trim(), password);
-    saveSession(result.accessToken, result.user);
-    toast.success("Welcome back!");
-    navigate("/dashboard");
-  } catch (err) {
-    const msg = (err as Error).message;
-    // If email not verified — redirect to verify page
-    if (msg.includes("Email not verified") || msg.includes("EMAIL_NOT_VERIFIED")) {
-      toast.error("Please verify your email first.");
-      navigate(`/verify-email?email=${encodeURIComponent(email.trim())}&name=Member`);
+  
+  // Replace handleLogin with this:
+  const handleLogin = async () => {
+    setError("");
+    if (!email.trim() || !password.trim()) {
+      setError("Email and password are required.");
       return;
     }
-    setError(msg);
-  } finally {
-    setIsLoading(false);
-  }
-};
-
+  
+    setIsLoading(true);
+    try {
+      const result = await login(email.trim(), password);
+      saveSession(result.accessToken, result.user);
+      toast.success("Welcome back!");
+      navigate("/dashboard");
+    } catch (err) {
+      const message = (err as Error).message;
+  
+      // Backend sends EMAIL_NOT_VERIFIED — redirect to verify page
+      if (
+        message.includes("EMAIL_NOT_VERIFIED") ||
+        message.includes("not verified") ||
+        message.includes("verify your email")
+      ) {
+        toast.error("Please verify your email first.");
+        navigate(
+          `/verify-email?email=${encodeURIComponent(email.trim())}&name=Member`
+        );
+        return;
+      }
+  
+      setError(message);
+    } finally {
+      setIsLoading(false);
+    }
+  };
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") handleLogin();
   };

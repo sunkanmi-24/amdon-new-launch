@@ -136,18 +136,18 @@ export interface LoginResult {
 }
 
 /** Login with email + password */
-export async function login(
-  email: string,
-  password: string
-): Promise<LoginResult> {
+export async function login(email: string, password: string): Promise<LoginResult> {
   try {
     const { data } = await client.post("/auth/login", { email, password });
     return data;
   } catch (err) {
-    throw new Error(extractError(err));
+    const e = err as AxiosError<{ error?: string; code?: string }>;
+    const code = e.response?.data?.code || "";
+    const message = e.response?.data?.error || e.message;
+    // Preserve the code in the error message so LoginPage can detect it
+    throw new Error(code ? `${message} [${code}]` : message);
   }
 }
-
 // ═══════════════════════════════════════════════════════════════════
 // MEMBER DASHBOARD
 // ═══════════════════════════════════════════════════════════════════

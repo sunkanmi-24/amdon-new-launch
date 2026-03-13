@@ -17,7 +17,6 @@ function generateOTP() {
 
 // ─── Helper: store code in DB ────────────────────────────────────
 async function storeCode(email, code, type) {
-  // Invalidate any existing unused codes for this email+type
   await supabaseAdmin
     .from('verification_codes')
     .update({ used: true })
@@ -25,7 +24,6 @@ async function storeCode(email, code, type) {
     .eq('type', type)
     .eq('used', false);
 
-  // Insert new code (expires in 10 minutes)
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
   const { error } = await supabaseAdmin.from('verification_codes').insert({
@@ -39,7 +37,7 @@ async function storeCode(email, code, type) {
   if (error) throw new Error(`Failed to store code: ${error.message}`);
 }
 
-// ─── Helper: verify code from DB ────────────────────────────────
+// ─── Helper: verify code ─────────────────────────────────────────
 async function verifyCode(email, code, type) {
   const { data, error } = await supabaseAdmin
     .from('verification_codes')
@@ -53,14 +51,11 @@ async function verifyCode(email, code, type) {
     .limit(1)
     .single();
 
-  if (error || !data) {
-    return { valid: false };
-  }
-
+  if (error || !data) return { valid: false };
   return { valid: true, record: data };
 }
 
-// ─── Helper: mark code as used ───────────────────────────────────
+// ─── Helper: mark code used ──────────────────────────────────────
 async function markCodeUsed(id) {
   await supabaseAdmin
     .from('verification_codes')
@@ -68,12 +63,6 @@ async function markCodeUsed(id) {
     .eq('id', id);
 }
 
-// ═══════════════════════════════════════════════════════════════
-// POST /api/auth/register-user
-// Create Supabase Auth account + send verification email
-// ═══════════════════════════════════════════════════════════════
-// POST /api/auth/register-user
-// ═══════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════
 // POST /api/auth/register-user
 // ═══════════════════════════════════════════════════════════════
@@ -97,28 +86,26 @@ router.post(
     try {
       let authUserId = null;
 
-      // ── Step 1: Check if THIS member already has an auth user ─
-      // This handles retry attempts on the same member record
-      const { data: existingMember } = await supabaseAdmin
+      // ── Step 1: Check if this member already has an auth account
+      const { data: existingMember, error: existingError } = await supabaseAdmin
         .from('members')
         .select('auth_user_id')
         .eq('member_id', memberId)
         .single();
 
+      console.log('[register-user] Existing member lookup:', existingMember, existingError?.message);
+
       if (existingMember?.auth_user_id) {
-        // Auth account already exists for this member —
-        // just update the password and move on
+        // Already linked — just update password
         authUserId = existingMember.auth_user_id;
+        console.log('[register-user] Reusing existing auth_user_id:', authUserId);
 
         const { error: updateError } =
-          await supabaseAdmin.auth.admin.updateUserById(authUserId, {
-            password,
-          });
-
-        if (updateError) throw updateError;
+          await supabaseAdmin.auth.admin.updateUserById(authUserId, { password });
+        if (updateError) throw new Error(`Password update failed: ${updateError.message}`);
 
       } else {
-        // ── Step 2: No auth user yet — try to create one ────────
+        // ── Step 2: Try to create fresh auth user ───────────────
         const { data: authData, error: authError } =
           await supabaseAdmin.auth.admin.createUser({
             email: cleanEmail,
@@ -127,14 +114,10 @@ router.post(
           });
 
         if (!authError) {
-          // Clean first-time creation
           authUserId = authData.user.id;
+          console.log('[register-user] Fresh auth user created:', authUserId);
 
         } else {
-          // Supabase says email already exists in Auth
-          // but our members table has no auth_user_id for this member.
-          // This means a DIFFERENT (possibly orphaned) member record
-          // previously used this email.
           const msg = authError.message.toLowerCase();
           const isAlreadyExists =
             msg.includes('already registered') ||
@@ -143,8 +126,9 @@ router.post(
 
           if (!isAlreadyExists) throw authError;
 
-          // Find the auth_user_id via another member record linked
-          // to this same email in member_contact
+          console.log('[register-user] Auth user already exists, searching DB...');
+
+          // ── Search other member records linked to this email ──
           const { data: contactRows } = await supabaseAdmin
             .from('member_contact')
             .select('member_id')
@@ -152,7 +136,6 @@ router.post(
 
           if (contactRows && contactRows.length > 0) {
             for (const row of contactRows) {
-              // Skip current member (we already know it has no auth_user_id)
               if (row.member_id === memberId) continue;
 
               const { data: linkedMember } = await supabaseAdmin
@@ -163,28 +146,26 @@ router.post(
 
               if (linkedMember?.auth_user_id) {
                 authUserId = linkedMember.auth_user_id;
+                console.log('[register-user] Found auth_user_id via linked member:', authUserId);
                 break;
               }
             }
           }
 
           if (!authUserId) {
-            // Auth user exists in Supabase but is completely
-            // unlinked in our DB — delete it and recreate cleanly
-            console.log('Auth user orphaned in Supabase, deleting and recreating...');
+            // Auth user orphaned in Supabase — delete + recreate
+            console.log('[register-user] Auth user orphaned, deleting and recreating...');
 
-            // Get their ID via listUsers (last resort, scoped small)
             const { data: listData } =
               await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
 
             const orphan = listData?.users?.find((u) => u.email === cleanEmail);
 
             if (orphan) {
-              // Delete the orphaned auth user
+              console.log('[register-user] Found orphan, deleting:', orphan.id);
               await supabaseAdmin.auth.admin.deleteUser(orphan.id);
             }
 
-            // Now recreate cleanly
             const { data: freshData, error: freshError } =
               await supabaseAdmin.auth.admin.createUser({
                 email: cleanEmail,
@@ -192,37 +173,49 @@ router.post(
                 email_confirm: true,
               });
 
-            if (freshError) throw freshError;
+            if (freshError) throw new Error(`Recreate failed: ${freshError.message}`);
             authUserId = freshData.user.id;
+            console.log('[register-user] Recreated auth user:', authUserId);
 
           } else {
-            // Found the linked auth user — update their password
+            // Update password for found existing user
             const { error: updateError } =
-              await supabaseAdmin.auth.admin.updateUserById(authUserId, {
-                password,
-              });
-
-            if (updateError) throw updateError;
+              await supabaseAdmin.auth.admin.updateUserById(authUserId, { password });
+            if (updateError) throw new Error(`Password update failed: ${updateError.message}`);
           }
         }
       }
 
-      // ── Step 3: Link auth_user_id to THIS member record ───────
-      const { error: linkError } = await supabaseAdmin
+      // ── Step 3: Link auth_user_id to this member record ────────
+      console.log('[register-user] Linking auth_user_id', authUserId, 'to member', memberId);
+
+      const { data: updateData, error: linkError } = await supabaseAdmin
         .from('members')
         .update({ auth_user_id: authUserId, email_verified: false })
-        .eq('member_id', memberId);
+        .eq('member_id', memberId)
+        .select(); // .select() confirms the row was actually updated
 
-      if (linkError) throw linkError;
+      if (linkError) throw new Error(`Link failed: ${linkError.message}`);
 
-      // ── Step 4: Invalidate old codes + store fresh OTP ────────
+      if (!updateData || updateData.length === 0) {
+        throw new Error(`Member record ${memberId} not found in DB — update affected 0 rows`);
+      }
+
+      console.log('[register-user] Link successful:', updateData);
+
+      // ── Step 4: Store OTP ────────────────────────────────────────
       const code = generateOTP();
       await storeCode(cleanEmail, code, 'email_verification');
+      console.log('[register-user] OTP stored for:', cleanEmail);
 
-      // ── Step 5: Send verification email (non-blocking) ────────
-      sendVerificationEmail({ to: cleanEmail, fullName, code }).catch((err) =>
-        console.error('Verification email failed (non-fatal):', err.message)
-      );
+      // ── Step 5: Send verification email (AWAITED — not fire+forget)
+      try {
+        await sendVerificationEmail({ to: cleanEmail, fullName, code });
+        console.log('[register-user] Verification email sent to:', cleanEmail);
+      } catch (emailErr) {
+        // Email failed but account is created — don't fail the whole request
+        console.error('[register-user] Email send failed (non-fatal):', emailErr.message);
+      }
 
       res.status(201).json({
         success: true,
@@ -231,7 +224,7 @@ router.post(
       });
 
     } catch (err) {
-      console.error('Register-user error:', err.message);
+      console.error('[register-user] Error:', err.message);
       res.status(500).json({
         error: 'Failed to create account. Please try again.',
         detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
@@ -239,9 +232,9 @@ router.post(
     }
   }
 );
+
 // ═══════════════════════════════════════════════════════════════
 // POST /api/auth/verify-email
-// Verify the 6-digit OTP sent after registration
 // ═══════════════════════════════════════════════════════════════
 router.post(
   '/verify-email',
@@ -269,23 +262,27 @@ router.post(
         });
       }
 
-      const {data:contactRecord, error:contactError} = await supabaseAdmin
-      .from('member_contact')
-      .select('member_id')
-      .eq('email', email.toLowerCase().trim())
-      .single()
+      // Mark code used
+      await markCodeUsed(record.id);
+
+      // Find member via member_contact
+      const { data: contactRecord, error: contactError } = await supabaseAdmin
+        .from('member_contact')
+        .select('member_id')
+        .eq('email', email.toLowerCase().trim())
+        .single();
 
       if (contactError || !contactRecord) {
-        return res.status(404).json({error:'Account not found'});
+        return res.status(404).json({ error: 'Member account not found.' });
       }
 
-     const {error:updateError} = await supabaseAdmin
-      .from('members')
-      .update({ email_verified: true })
-      .eq('member_id', contactRecord.member_id)
+      // Mark email_verified = true
+      const { error: updateError } = await supabaseAdmin
+        .from('members')
+        .update({ email_verified: true })
+        .eq('member_id', contactRecord.member_id);
 
       if (updateError) throw updateError;
-
 
       res.json({
         success: true,
@@ -300,23 +297,25 @@ router.post(
 
 // ═══════════════════════════════════════════════════════════════
 // POST /api/auth/resend-verification
-// Resend a new OTP for email verification
 // ═══════════════════════════════════════════════════════════════
 router.post(
   '/resend-verification',
-  [body('email').isEmail(), body('fullName').notEmpty()],
+  [
+    body('email').isEmail().withMessage('Valid email required'),
+    body('fullName').notEmpty().withMessage('Full name required'),
+  ],
   async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
     const { email, fullName } = req.body;
 
     try {
       const code = generateOTP();
-      await storeCode(email, code, 'email_verification');
-
-      await sendVerificationEmail({
-        to: email.toLowerCase().trim(),
-        fullName,
-        code,
-      });
+      await storeCode(email.toLowerCase().trim(), code, 'email_verification');
+      await sendVerificationEmail({ to: email.toLowerCase().trim(), fullName, code });
 
       res.json({ success: true, message: 'A new verification code has been sent.' });
     } catch (err) {
@@ -342,10 +341,11 @@ router.post(
     }
 
     const { email, password } = req.body;
+    const cleanEmail = email.toLowerCase().trim();
 
     try {
       const { data, error } = await supabaseAdmin.auth.signInWithPassword({
-        email: email.toLowerCase().trim(),
+        email: cleanEmail,
         password,
       });
 
@@ -353,7 +353,7 @@ router.post(
         return res.status(401).json({ error: 'Invalid email or password.' });
       }
 
-      // Check if email is verified
+      // Check email_verified flag
       const { data: member } = await supabaseAdmin
         .from('members')
         .select('email_verified, member_id')
@@ -361,10 +361,13 @@ router.post(
         .single();
 
       if (member && !member.email_verified) {
+        // Sign out the session we just created — they shouldn't be logged in yet
+        await supabaseAdmin.auth.admin.signOut(data.session.access_token).catch(() => {});
+
         return res.status(403).json({
-          error: 'Email not verified.',
+          error: 'Please verify your email before logging in.',
           code: 'EMAIL_NOT_VERIFIED',
-          email: email.toLowerCase().trim(),
+          email: cleanEmail,
         });
       }
 
@@ -383,7 +386,6 @@ router.post(
 
 // ═══════════════════════════════════════════════════════════════
 // POST /api/auth/forgot-password
-// Send a password reset OTP
 // ═══════════════════════════════════════════════════════════════
 router.post(
   '/forgot-password',
@@ -395,35 +397,29 @@ router.post(
     }
 
     const { email } = req.body;
+    const cleanEmail = email.toLowerCase().trim();
 
-const safeResponse = {
-  success: true,
-  message: 'If an account with that email exists, a reset code has been sent.'
-}
+    const safeResponse = {
+      success: true,
+      message: 'If an account with that email exists, a reset code has been sent.',
+    };
+
     try {
-      // Check 
-      // if the email exists in Supabase Auth
-       //{ data: authUser } = await supabaseAdmin.auth.admin.getUserByEmail(
-      const {data:contactRecord} = await supabaseAdmin
-      .from('member_contact')
-      .select('member_id')
-      .eq('email', email.toLowerCase().trim())
-      .maybeSingle()
+      const { data: contactRecord } = await supabaseAdmin
+        .from('member_contact')
+        .select('member_id')
+        .eq('email', cleanEmail)
+        .maybeSingle();
 
-      // Always return 200 — never reveal if email exists (security best practice)
-    if (!contactRecord) {
-      return res.json(safeResponse);
-    }
-      
+      if (!contactRecord) {
+        return res.json(safeResponse);
+      }
+
       const code = generateOTP();
-      await storeCode(email, code, 'password_reset');
+      await storeCode(cleanEmail, code, 'password_reset');
+      await sendPasswordResetEmail({ to: cleanEmail, code });
 
-      await sendPasswordResetEmail({
-        to: email.toLowerCase().trim(),
-        code,
-      });
-
-      res.json({safeResponse});
+      res.json(safeResponse);
     } catch (err) {
       console.error('Forgot password error:', err.message);
       res.status(500).json({ error: 'Failed to process request. Please try again.' });
@@ -433,16 +429,13 @@ const safeResponse = {
 
 // ═══════════════════════════════════════════════════════════════
 // POST /api/auth/reset-password
-// Verify OTP and set new password
 // ═══════════════════════════════════════════════════════════════
 router.post(
   '/reset-password',
   [
     body('email').isEmail().withMessage('Valid email is required'),
     body('code').isLength({ min: 6, max: 6 }).isNumeric().withMessage('Invalid code'),
-    body('newPassword')
-      .isLength({ min: 8 })
-      .withMessage('Password must be at least 8 characters'),
+    body('newPassword').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
@@ -451,10 +444,10 @@ router.post(
     }
 
     const { email, code, newPassword } = req.body;
+    const cleanEmail = email.toLowerCase().trim();
 
     try {
-      // Verify the OTP
-      const { valid, record } = await verifyCode(email, code, 'password_reset');
+      const { valid, record } = await verifyCode(cleanEmail, code, 'password_reset');
 
       if (!valid) {
         return res.status(400).json({
@@ -462,42 +455,38 @@ router.post(
         });
       }
 
-      // Get the Supabase Auth user
-       const {data:contactRecord, error:contactError} = await supabaseAdmin
-      .from('member_contact')
-      .select('member_id')
-      .eq('email', email.toLowerCase().trim())
-      .single()
+      const { data: contactRecord, error: contactError } = await supabaseAdmin
+        .from('member_contact')
+        .select('member_id')
+        .eq('email', cleanEmail)
+        .single();
 
-      // Always return 200 — never reveal if email exists (security best practice)
-    if (contactError || !contactRecord) {
-      return res.status(404).json({error:'Account not found'});
-    }
-     const {data:memberRecord, error:memberError} = await supabaseAdmin
-      .from('members')
-      .select('auth_user_id')
-      .eq('member_id', contactRecord.member_id)
-      .single()
+      if (contactError || !contactRecord) {
+        return res.status(404).json({ error: 'Account not found.' });
+      }
 
-      // Always return 200 — never reveal if email exists (security best practice)
-    if (memberError || !memberRecord?.auth_user_id) {
-      return res.status(404).json({error:'Account not found'});
-    }
+      const { data: memberRecord, error: memberError } = await supabaseAdmin
+        .from('members')
+        .select('auth_user_id')
+        .eq('member_id', contactRecord.member_id)
+        .single();
 
-      // Update password via Supabase Admin
-      const { error: updateError } =
-        await supabaseAdmin.auth.admin.updateUserById(memberRecord.auth_user_id, {
-          password: newPassword,
-        });
+      if (memberError || !memberRecord?.auth_user_id) {
+        return res.status(404).json({ error: 'Auth account not found.' });
+      }
+
+      const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(
+        memberRecord.auth_user_id,
+        { password: newPassword }
+      );
 
       if (updateError) throw updateError;
 
-      // Mark code as used
       await markCodeUsed(record.id);
 
       res.json({
         success: true,
-        message: 'Password reset successfully. You can now log in with your new password.',
+        message: 'Password reset successfully. You can now log in.',
       });
     } catch (err) {
       console.error('Reset password error:', err.message);
@@ -507,7 +496,7 @@ router.post(
 );
 
 // ═══════════════════════════════════════════════════════════════
-// POST /api/auth/admin/create  (unchanged)
+// POST /api/auth/admin/create
 // ═══════════════════════════════════════════════════════════════
 router.post('/admin/create', async (req, res) => {
   const adminSecret = req.headers['x-admin-secret'];
