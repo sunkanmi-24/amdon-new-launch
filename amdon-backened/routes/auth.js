@@ -74,6 +74,9 @@ async function markCodeUsed(id) {
 // ═══════════════════════════════════════════════════════════════
 // POST /api/auth/register-user
 // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// POST /api/auth/register-user
+// ═══════════════════════════════════════════════════════════════
 router.post(
   '/register-user',
   [
@@ -94,87 +97,117 @@ router.post(
     try {
       let authUserId = null;
 
-      // ── Step 1: Try creating a fresh Supabase Auth user ───────
-      const { data: authData, error: authError } =
-        await supabaseAdmin.auth.admin.createUser({
-          email: cleanEmail,
-          password,
-          email_confirm: true,
-        });
+      // ── Step 1: Check if THIS member already has an auth user ─
+      // This handles retry attempts on the same member record
+      const { data: existingMember } = await supabaseAdmin
+        .from('members')
+        .select('auth_user_id')
+        .eq('member_id', memberId)
+        .single();
 
-      if (!authError) {
-        // Fresh user — happy path
-        authUserId = authData.user.id;
+      if (existingMember?.auth_user_id) {
+        // Auth account already exists for this member —
+        // just update the password and move on
+        authUserId = existingMember.auth_user_id;
 
-      } else {
-        // ── Auth user already exists from a previous attempt ───
-        const msg = authError.message.toLowerCase();
-        const isAlreadyExists =
-          msg.includes('already registered') ||
-          msg.includes('already been registered') ||
-          msg.includes('user already exists');
-
-        if (!isAlreadyExists) {
-          // Genuinely unexpected error
-          throw authError;
-        }
-
-        // ── Look up the existing auth_user_id from our own DB ──
-        // Strategy: find any OTHER member record that is already
-        // linked to this email via member_contact, and get their
-        // auth_user_id from the members table.
-
-        const { data: contactRows } = await supabaseAdmin
-          .from('member_contact')
-          .select('member_id')
-          .eq('email', cleanEmail);
-
-        if (contactRows && contactRows.length > 0) {
-          // Try each contact row until we find one with an auth_user_id
-          for (const row of contactRows) {
-            const { data: memberRow } = await supabaseAdmin
-              .from('members')
-              .select('auth_user_id')
-              .eq('member_id', row.member_id)
-              .maybeSingle();
-
-            if (memberRow?.auth_user_id) {
-              authUserId = memberRow.auth_user_id;
-              break;
-            }
-          }
-        }
-
-        if (!authUserId) {
-          // Last resort — sign in with a dummy attempt just to
-          // trigger Supabase to return the user object on next call.
-          // We sign in using supabase directly to extract the uid.
-          const { data: signInData } =
-            await supabaseAdmin.auth.signInWithPassword({
-              email: cleanEmail,
-              password: 'PROBE_WILL_FAIL_intentionally',
-            });
-
-          // signInData will be null but we handle below
-          // If none of the above worked, we truly cannot resolve it
-          if (!authUserId) {
-            return res.status(409).json({
-              error:
-                'This email is already registered. Please go to login or use forgot password to recover your account.',
-            });
-          }
-        }
-
-        // ── Update the existing user's password ────────────────
         const { error: updateError } =
           await supabaseAdmin.auth.admin.updateUserById(authUserId, {
             password,
           });
 
         if (updateError) throw updateError;
+
+      } else {
+        // ── Step 2: No auth user yet — try to create one ────────
+        const { data: authData, error: authError } =
+          await supabaseAdmin.auth.admin.createUser({
+            email: cleanEmail,
+            password,
+            email_confirm: true,
+          });
+
+        if (!authError) {
+          // Clean first-time creation
+          authUserId = authData.user.id;
+
+        } else {
+          // Supabase says email already exists in Auth
+          // but our members table has no auth_user_id for this member.
+          // This means a DIFFERENT (possibly orphaned) member record
+          // previously used this email.
+          const msg = authError.message.toLowerCase();
+          const isAlreadyExists =
+            msg.includes('already registered') ||
+            msg.includes('already been registered') ||
+            msg.includes('user already exists');
+
+          if (!isAlreadyExists) throw authError;
+
+          // Find the auth_user_id via another member record linked
+          // to this same email in member_contact
+          const { data: contactRows } = await supabaseAdmin
+            .from('member_contact')
+            .select('member_id')
+            .eq('email', cleanEmail);
+
+          if (contactRows && contactRows.length > 0) {
+            for (const row of contactRows) {
+              // Skip current member (we already know it has no auth_user_id)
+              if (row.member_id === memberId) continue;
+
+              const { data: linkedMember } = await supabaseAdmin
+                .from('members')
+                .select('auth_user_id')
+                .eq('member_id', row.member_id)
+                .maybeSingle();
+
+              if (linkedMember?.auth_user_id) {
+                authUserId = linkedMember.auth_user_id;
+                break;
+              }
+            }
+          }
+
+          if (!authUserId) {
+            // Auth user exists in Supabase but is completely
+            // unlinked in our DB — delete it and recreate cleanly
+            console.log('Auth user orphaned in Supabase, deleting and recreating...');
+
+            // Get their ID via listUsers (last resort, scoped small)
+            const { data: listData } =
+              await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+
+            const orphan = listData?.users?.find((u) => u.email === cleanEmail);
+
+            if (orphan) {
+              // Delete the orphaned auth user
+              await supabaseAdmin.auth.admin.deleteUser(orphan.id);
+            }
+
+            // Now recreate cleanly
+            const { data: freshData, error: freshError } =
+              await supabaseAdmin.auth.admin.createUser({
+                email: cleanEmail,
+                password,
+                email_confirm: true,
+              });
+
+            if (freshError) throw freshError;
+            authUserId = freshData.user.id;
+
+          } else {
+            // Found the linked auth user — update their password
+            const { error: updateError } =
+              await supabaseAdmin.auth.admin.updateUserById(authUserId, {
+                password,
+              });
+
+            if (updateError) throw updateError;
+          }
+        }
       }
 
-      // ── Step 2: Link auth_user_id to THIS member record ───────
+      // ── Step 3: Link auth_user_id to THIS member record ───────
       const { error: linkError } = await supabaseAdmin
         .from('members')
         .update({ auth_user_id: authUserId, email_verified: false })
@@ -182,11 +215,11 @@ router.post(
 
       if (linkError) throw linkError;
 
-      // ── Step 3: Generate + store OTP ──────────────────────────
+      // ── Step 4: Invalidate old codes + store fresh OTP ────────
       const code = generateOTP();
       await storeCode(cleanEmail, code, 'email_verification');
 
-      // ── Step 4: Send verification email (non-blocking) ────────
+      // ── Step 5: Send verification email (non-blocking) ────────
       sendVerificationEmail({ to: cleanEmail, fullName, code }).catch((err) =>
         console.error('Verification email failed (non-fatal):', err.message)
       );
@@ -196,6 +229,7 @@ router.post(
         message: 'Account ready. Check your email for the verification code.',
         userId: authUserId,
       });
+
     } catch (err) {
       console.error('Register-user error:', err.message);
       res.status(500).json({
@@ -205,8 +239,6 @@ router.post(
     }
   }
 );
-
-
 // ═══════════════════════════════════════════════════════════════
 // POST /api/auth/verify-email
 // Verify the 6-digit OTP sent after registration
@@ -364,7 +396,7 @@ router.post(
 
     const { email } = req.body;
 
-const safeRespone = {
+const safeResponse = {
   success: true,
   message: 'If an account with that email exists, a reset code has been sent.'
 }
@@ -380,7 +412,7 @@ const safeRespone = {
 
       // Always return 200 — never reveal if email exists (security best practice)
     if (!contactRecord) {
-      return res.json(safeRespone);
+      return res.json(safeResponse);
     }
       
       const code = generateOTP();
@@ -391,9 +423,7 @@ const safeRespone = {
         code,
       });
 
-      res.json({
-       safeRespone
-      });
+      res.json({safeResponse});
     } catch (err) {
       console.error('Forgot password error:', err.message);
       res.status(500).json({ error: 'Failed to process request. Please try again.' });
