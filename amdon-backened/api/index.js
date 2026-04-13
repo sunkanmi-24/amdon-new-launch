@@ -1,20 +1,5 @@
-const express = require('express');
-const app = express();
+// api/index.js - Vercel serverless entry point
+const app = require("../index");
 
-require('dotenv').config();
-
-app.use(express.json());
-
-// ✅ Correct path
-const adminRoutes = require('../routes/admin');
-
-app.use('/api/admin', adminRoutes);
-
-// ✅ Health check route
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK ✅' });
-});
-
-// ❌ NO app.listen()
-
+// Vercel serverless handler
 module.exports = app;
